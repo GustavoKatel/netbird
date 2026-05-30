@@ -2134,22 +2134,33 @@ components:
       type: object
       properties:
         ip:
-          description: Nameserver IP
+          description: |
+            Nameserver IP. Required for `udp` nameservers. Empty for `doh` and `nextdns`.
           type: string
           example: 8.8.8.8
         ns_type:
-          description: Nameserver Type
+          description: |
+            Nameserver Type. `udp` uses plain DNS over UDP. `doh` issues
+            DNS-over-HTTPS requests against the URL in the `url` field.
+            `nextdns` is shorthand for a NextDNS profile; the client builds
+            the request URL from the profile/config ID stored in `url` and
+            appends the device name as a query parameter.
           type: string
-          enum: [ "udp" ]
+          enum: [ "udp", "doh", "nextdns" ]
           example: udp
         port:
-          description: Nameserver Port
+          description: Nameserver Port. Required for `udp` nameservers; ignored otherwise.
           type: integer
           example: 53
+        url:
+          description: |
+            Nameserver URL. For `doh`, the full https endpoint
+            (e.g. `https://dns.google/dns-query`). For `nextdns`, the
+            profile/config ID (e.g. `abc123`).
+          type: string
+          example: https://dns.google/dns-query
       required:
-        - ip
         - ns_type
-        - port
     NameserverGroupRequest:
       type: object
       properties:

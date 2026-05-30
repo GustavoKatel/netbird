@@ -733,12 +733,18 @@ func (e JobResponseStatus) Valid() bool {
 
 // Defines values for NameserverNsType.
 const (
-	NameserverNsTypeUdp NameserverNsType = "udp"
+	NameserverNsTypeDoh     NameserverNsType = "doh"
+	NameserverNsTypeNextdns NameserverNsType = "nextdns"
+	NameserverNsTypeUdp     NameserverNsType = "udp"
 )
 
 // Valid indicates whether the value is a known member of the NameserverNsType enum.
 func (e NameserverNsType) Valid() bool {
 	switch e {
+	case NameserverNsTypeDoh:
+		return true
+	case NameserverNsTypeNextdns:
+		return true
 	case NameserverNsTypeUdp:
 		return true
 	default:
@@ -3732,17 +3738,30 @@ type NBVersionCheck = MinVersionCheck
 
 // Nameserver defines model for Nameserver.
 type Nameserver struct {
-	// Ip Nameserver IP
-	Ip string `json:"ip"`
+	// Ip Nameserver IP. Required for `udp` nameservers. Empty for `doh` and `nextdns`.
+	Ip *string `json:"ip,omitempty"`
 
-	// NsType Nameserver Type
+	// NsType Nameserver Type. `udp` uses plain DNS over UDP. `doh` issues
+	// DNS-over-HTTPS requests against the URL in the `url` field.
+	// `nextdns` is shorthand for a NextDNS profile; the client builds
+	// the request URL from the profile/config ID stored in `url` and
+	// appends the device name as a query parameter.
 	NsType NameserverNsType `json:"ns_type"`
 
-	// Port Nameserver Port
-	Port int `json:"port"`
+	// Port Nameserver Port. Required for `udp` nameservers; ignored otherwise.
+	Port *int `json:"port,omitempty"`
+
+	// Url Nameserver URL. For `doh`, the full https endpoint
+	// (e.g. `https://dns.google/dns-query`). For `nextdns`, the
+	// profile/config ID (e.g. `abc123`).
+	Url *string `json:"url,omitempty"`
 }
 
-// NameserverNsType Nameserver Type
+// NameserverNsType Nameserver Type. `udp` uses plain DNS over UDP. `doh` issues
+// DNS-over-HTTPS requests against the URL in the `url` field.
+// `nextdns` is shorthand for a NextDNS profile; the client builds
+// the request URL from the profile/config ID stored in `url` and
+// appends the device name as a query parameter.
 type NameserverNsType string
 
 // NameserverGroup defines model for NameserverGroup.

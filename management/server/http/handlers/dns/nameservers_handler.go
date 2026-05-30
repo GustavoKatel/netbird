@@ -204,11 +204,11 @@ func (h *nameserversHandler) getNameserverGroup(w http.ResponseWriter, r *http.R
 func toServerNSList(apiNSList []api.Nameserver) ([]nbdns.NameServer, error) {
 	var nsList []nbdns.NameServer
 	for _, apiNS := range apiNSList {
-		host, err := unwrapBracketedHost(apiNS.Ip)
+		nsURL, err := apiNameserverToURL(apiNS)
 		if err != nil {
 			return nil, err
 		}
-		parsed, err := nbdns.ParseNameServerURL(fmt.Sprintf("%s://%s", apiNS.NsType, net.JoinHostPort(host, strconv.Itoa(apiNS.Port))))
+		parsed, err := nbdns.ParseNameServerURL(nsURL)
 		if err != nil {
 			return nil, err
 		}
@@ -216,6 +216,47 @@ func toServerNSList(apiNSList []api.Nameserver) ([]nbdns.NameServer, error) {
 	}
 
 	return nsList, nil
+}
+
+// apiNameserverToURL converts an API nameserver entry to the scheme-prefixed
+// form expected by nbdns.ParseNameServerURL. It validates that fields required
+// by each type are present.
+func apiNameserverToURL(apiNS api.Nameserver) (string, error) {
+	switch apiNS.NsType {
+	case api.NameserverNsTypeUdp:
+		if apiNS.Ip == nil || *apiNS.Ip == "" {
+			return "", fmt.Errorf("udp nameserver requires ip")
+		}
+		if apiNS.Port == nil {
+			return "", fmt.Errorf("udp nameserver requires port")
+		}
+		host, err := unwrapBracketedHost(*apiNS.Ip)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("udp://%s", net.JoinHostPort(host, strconv.Itoa(*apiNS.Port))), nil
+	case api.NameserverNsTypeDoh:
+		if apiNS.Url == nil || *apiNS.Url == "" {
+			return "", fmt.Errorf("doh nameserver requires url")
+		}
+		// Accept full URL with scheme; rewrite to doh:// for ParseNameServerURL.
+		u := *apiNS.Url
+		switch {
+		case strings.HasPrefix(u, "https://"):
+			return "doh://" + strings.TrimPrefix(u, "https://"), nil
+		case strings.HasPrefix(u, "doh://"):
+			return u, nil
+		default:
+			return "", fmt.Errorf("doh nameserver url must start with https://")
+		}
+	case api.NameserverNsTypeNextdns:
+		if apiNS.Url == nil || *apiNS.Url == "" {
+			return "", fmt.Errorf("nextdns nameserver requires url with config id")
+		}
+		return "nextdns://" + *apiNS.Url, nil
+	default:
+		return "", fmt.Errorf("unknown nameserver type %q", apiNS.NsType)
+	}
 }
 
 // unwrapBracketedHost returns ip with surrounding brackets stripped, rejecting
@@ -234,9 +275,17 @@ func toNameserverGroupResponse(serverNSGroup *nbdns.NameServerGroup) *api.Namese
 	var nsList []api.Nameserver
 	for _, ns := range serverNSGroup.NameServers {
 		apiNS := api.Nameserver{
-			Ip:     ns.IP.String(),
 			NsType: api.NameserverNsType(ns.NSType.String()),
-			Port:   ns.Port,
+		}
+		switch ns.NSType {
+		case nbdns.UDPNameServerType:
+			ip := ns.IP.String()
+			port := ns.Port
+			apiNS.Ip = &ip
+			apiNS.Port = &port
+		case nbdns.DoHNameServerType, nbdns.NextDNSNameServerType:
+			url := ns.URL
+			apiNS.Url = &url
 		}
 		nsList = append(nsList, apiNS)
 	}

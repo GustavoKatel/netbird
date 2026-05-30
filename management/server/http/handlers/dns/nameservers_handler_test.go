@@ -30,6 +30,9 @@ const (
 	testNSGroupAccountID = "test_id"
 )
 
+func ptrString(s string) *string { return &s }
+func ptrInt(i int) *int          { return &i }
+
 var baseExistingNSGroup = &nbdns.NameServerGroup{
 	ID:          existingNSGroupID,
 	Name:        "super",
@@ -125,9 +128,9 @@ func TestNameserversHandlers(t *testing.T) {
 				Description: "Post",
 				Nameservers: []api.Nameserver{
 					{
-						Ip:     "1.1.1.1",
+						Ip:     ptrString("1.1.1.1"),
 						NsType: "udp",
-						Port:   53,
+						Port:   ptrInt(53),
 					},
 				},
 				Groups:  []string{"group"},
@@ -158,9 +161,9 @@ func TestNameserversHandlers(t *testing.T) {
 				Description: "Post",
 				Nameservers: []api.Nameserver{
 					{
-						Ip:     "1.1.1.1",
+						Ip:     ptrString("1.1.1.1"),
 						NsType: "udp",
-						Port:   53,
+						Port:   ptrInt(53),
 					},
 				},
 				Groups:  []string{"group"},
@@ -243,14 +246,14 @@ func TestToServerNSList_IPv6(t *testing.T) {
 		{
 			name: "IPv4",
 			input: []api.Nameserver{
-				{Ip: "1.1.1.1", NsType: "udp", Port: 53},
+				{Ip: ptrString("1.1.1.1"), NsType: "udp", Port: ptrInt(53)},
 			},
 			expectIP: netip.MustParseAddr("1.1.1.1"),
 		},
 		{
 			name: "IPv6",
 			input: []api.Nameserver{
-				{Ip: "2001:4860:4860::8888", NsType: "udp", Port: 53},
+				{Ip: ptrString("2001:4860:4860::8888"), NsType: "udp", Port: ptrInt(53)},
 			},
 			expectIP: netip.MustParseAddr("2001:4860:4860::8888"),
 		},
