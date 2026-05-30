@@ -13,6 +13,13 @@ const (
 	InvalidNameServerType NameServerType = iota
 	// UDPNameServerType udp nameserver type
 	UDPNameServerType
+	// DoHNameServerType DNS-over-HTTPS nameserver type. The full DoH URL is
+	// stored on NameServer.URL; IP and Port are unused.
+	DoHNameServerType
+	// NextDNSNameServerType NextDNS DoH shorthand. NameServer.URL holds the
+	// NextDNS profile/config ID; the client builds the full URL at query time
+	// and appends device identification.
+	NextDNSNameServerType
 )
 
 const (
@@ -22,6 +29,10 @@ const (
 	InvalidNameServerTypeString = "invalid"
 	// UDPNameServerTypeString udp nameserver type as string
 	UDPNameServerTypeString = "udp"
+	// DoHNameServerTypeString DoH nameserver type as string
+	DoHNameServerTypeString = "doh"
+	// NextDNSNameServerTypeString NextDNS nameserver type as string
+	NextDNSNameServerTypeString = "nextdns"
 )
 
 // NameServerType nameserver type
@@ -32,6 +43,10 @@ func (n NameServerType) String() string {
 	switch n {
 	case UDPNameServerType:
 		return UDPNameServerTypeString
+	case DoHNameServerType:
+		return DoHNameServerTypeString
+	case NextDNSNameServerType:
+		return NextDNSNameServerTypeString
 	default:
 		return InvalidNameServerTypeString
 	}
@@ -42,6 +57,10 @@ func ToNameServerType(typeString string) NameServerType {
 	switch typeString {
 	case UDPNameServerTypeString:
 		return UDPNameServerType
+	case DoHNameServerTypeString:
+		return DoHNameServerType
+	case NextDNSNameServerTypeString:
+		return NextDNSNameServerType
 	default:
 		return InvalidNameServerType
 	}
@@ -74,12 +93,15 @@ type NameServerGroup struct {
 
 // NameServer represents a DNS nameserver
 type NameServer struct {
-	// IP address of nameserver
+	// IP address of nameserver (UDP/DoT). Unset for DoH/NextDNS.
 	IP netip.Addr
 	// NSType nameserver type
 	NSType NameServerType
-	// Port nameserver listening port
+	// Port nameserver listening port (UDP/DoT). Unset for DoH/NextDNS.
 	Port int
+	// URL is used for non-IP nameserver types. For DoH it stores the full
+	// `https://...` endpoint; for NextDNS it stores the profile/config ID.
+	URL string
 }
 
 // EventMeta returns activity event meta related to the nameserver group
@@ -93,6 +115,7 @@ func (n *NameServer) Copy() *NameServer {
 		IP:     n.IP,
 		NSType: n.NSType,
 		Port:   n.Port,
+		URL:    n.URL,
 	}
 }
 
@@ -100,15 +123,22 @@ func (n *NameServer) Copy() *NameServer {
 func (n *NameServer) IsEqual(other *NameServer) bool {
 	return other.IP == n.IP &&
 		other.NSType == n.NSType &&
-		other.Port == n.Port
+		other.Port == n.Port &&
+		other.URL == n.URL
 }
 
-// AddrPort returns the nameserver as a netip.AddrPort
+// AddrPort returns the nameserver as a netip.AddrPort. Only meaningful for
+// IP-based nameserver types (UDP/DoT).
 func (n *NameServer) AddrPort() netip.AddrPort {
 	return netip.AddrPortFrom(n.IP, uint16(n.Port))
 }
 
-// ParseNameServerURL parses a nameserver url in the format <type>://<ip>:<port>, e.g., udp://1.1.1.1:53
+// ParseNameServerURL parses a nameserver URL.
+// Supported forms:
+//
+//	udp://<ip>:<port>            e.g. udp://1.1.1.1:53
+//	doh://<host>[:<port>]/<path> e.g. doh://dns.google/dns-query
+//	nextdns://<config_id>        e.g. nextdns://abc123
 func ParseNameServerURL(nsURL string) (NameServer, error) {
 	parsedURL, err := url.Parse(nsURL)
 	if err != nil {
@@ -122,18 +152,40 @@ func ParseNameServerURL(nsURL string) (NameServer, error) {
 	}
 	ns.NSType = nsType
 
-	parsedPort, err := strconv.Atoi(parsedURL.Port())
-	if err != nil {
-		return NameServer{}, fmt.Errorf("invalid nameserver url port, got %s", parsedURL.Port())
-	}
-	ns.Port = parsedPort
+	switch nsType {
+	case UDPNameServerType:
+		parsedPort, err := strconv.Atoi(parsedURL.Port())
+		if err != nil {
+			return NameServer{}, fmt.Errorf("invalid nameserver url port, got %s", parsedURL.Port())
+		}
+		ns.Port = parsedPort
 
-	parsedAddr, err := netip.ParseAddr(parsedURL.Hostname())
-	if err != nil {
-		return NameServer{}, fmt.Errorf("invalid nameserver url IP, got %s", parsedURL.Hostname())
-	}
+		parsedAddr, err := netip.ParseAddr(parsedURL.Hostname())
+		if err != nil {
+			return NameServer{}, fmt.Errorf("invalid nameserver url IP, got %s", parsedURL.Hostname())
+		}
+		ns.IP = parsedAddr
 
-	ns.IP = parsedAddr
+	case DoHNameServerType:
+		if parsedURL.Host == "" {
+			return NameServer{}, fmt.Errorf("doh nameserver url is missing host")
+		}
+		// Re-emit as https:// so the stored URL is directly usable by the client.
+		dohURL := *parsedURL
+		dohURL.Scheme = "https"
+		ns.URL = dohURL.String()
+
+	case NextDNSNameServerType:
+		// Accept both nextdns://<id> (id parsed as host) and nextdns:<id>.
+		configID := parsedURL.Host
+		if configID == "" {
+			configID = strings.TrimPrefix(parsedURL.Opaque, "/")
+		}
+		if configID == "" {
+			return NameServer{}, fmt.Errorf("nextdns nameserver url is missing config id")
+		}
+		ns.URL = configID
+	}
 
 	return ns, nil
 }
