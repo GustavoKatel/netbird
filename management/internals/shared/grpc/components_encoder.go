@@ -518,11 +518,15 @@ func encodeNameServers(servers []nmdata.NameServer) []*proto.NameServer {
 	}
 	out := make([]*proto.NameServer, 0, len(servers))
 	for _, s := range servers {
-		out = append(out, &proto.NameServer{
-			IP:     s.IP.String(),
+		ns := &proto.NameServer{
 			NSType: int64(s.NSType),
 			Port:   int64(s.Port),
-		})
+			URL:    s.URL,
+		}
+		if s.IP.IsValid() {
+			ns.IP = s.IP.String()
+		}
+		out = append(out, ns)
 	}
 	return out
 }

@@ -1828,9 +1828,17 @@ func toDNSConfig(protoDNSConfig *mgmProto.DNSConfig, addr wgaddr.Address) nbdns.
 		}
 		for _, ns := range nsGroup.GetNameServers() {
 			dnsNS := nbdns.NameServer{
-				IP:     netip.MustParseAddr(ns.GetIP()),
 				NSType: nbdns.NameServerType(ns.GetNSType()),
 				Port:   int(ns.GetPort()),
+				URL:    ns.GetURL(),
+			}
+			if ipStr := ns.GetIP(); ipStr != "" {
+				addr, err := netip.ParseAddr(ipStr)
+				if err != nil {
+					log.Warnf("skipping nameserver with invalid IP %q: %v", ipStr, err)
+					continue
+				}
+				dnsNS.IP = addr
 			}
 			dnsNSGroup.NameServers = append(dnsNSGroup.NameServers, dnsNS)
 		}

@@ -477,11 +477,12 @@ func decodeNameServerGroupRaw(nsg *proto.NameServerGroupRaw) *nmdata.NameServerG
 		NameServers:          make([]nmdata.NameServer, 0, len(nsg.Nameservers)),
 	}
 	for _, ns := range nsg.Nameservers {
-		if addr, err := netip.ParseAddr(ns.IP); err == nil {
+		if addr, err := netip.ParseAddr(ns.IP); err == nil || ns.IP == "" {
 			out.NameServers = append(out.NameServers, nmdata.NameServer{
 				IP:     addr,
 				NSType: int(ns.NSType),
 				Port:   int(ns.Port),
+				URL:    ns.URL,
 			})
 		}
 	}

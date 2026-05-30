@@ -222,11 +222,15 @@ func ConvertToProtoNameServerGroup(nsGroup *nbdns.NameServerGroup) *proto.NameSe
 		NameServers:          make([]*proto.NameServer, 0, len(nsGroup.NameServers)),
 	}
 	for _, ns := range nsGroup.NameServers {
-		protoGroup.NameServers = append(protoGroup.NameServers, &proto.NameServer{
-			IP:     ns.IP.String(),
+		protoNS := &proto.NameServer{
 			Port:   int64(ns.Port),
 			NSType: int64(ns.NSType),
-		})
+			URL:    ns.URL,
+		}
+		if ns.IP.IsValid() {
+			protoNS.IP = ns.IP.String()
+		}
+		protoGroup.NameServers = append(protoGroup.NameServers, protoNS)
 	}
 	return protoGroup
 }

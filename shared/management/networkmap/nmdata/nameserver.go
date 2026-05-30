@@ -21,4 +21,5 @@ type NameServer struct {
 	IP     netip.Addr
 	NSType int
 	Port   int
+	URL    string
 }

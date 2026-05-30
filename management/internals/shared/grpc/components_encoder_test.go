@@ -608,7 +608,7 @@ func TestEncodeNetworkMapEnvelope_NameServerGroups(t *testing.T) {
 		ID: "nsg-1", PublicID: "50", Name: "Main", Description: "primary",
 		NameServers: []nmdata.NameServer{{
 			IP: netip.MustParseAddr("8.8.8.8"), NSType: int(nbdns.UDPNameServerType), Port: 53,
-		}},
+		}, {NSType: int(nbdns.DoHNameServerType), URL: "https://dns.example/dns-query"}, {NSType: int(nbdns.NextDNSNameServerType), URL: "abc123"}},
 		Groups:  []string{"group-src", "group-not-persisted"},
 		Primary: true, Enabled: true,
 		Domains: []string{"corp.example"},
@@ -620,7 +620,11 @@ func TestEncodeNetworkMapEnvelope_NameServerGroups(t *testing.T) {
 	nsg := full.NameserverGroups[0]
 	assert.EqualValues(t, "50", nsg.Id)
 	assert.True(t, nsg.Primary)
-	require.Len(t, nsg.Nameservers, 1)
+	require.Len(t, nsg.Nameservers, 3)
+	assert.Empty(t, nsg.Nameservers[1].IP)
+	assert.Equal(t, "https://dns.example/dns-query", nsg.Nameservers[1].URL)
+	assert.Empty(t, nsg.Nameservers[2].IP)
+	assert.Equal(t, "abc123", nsg.Nameservers[2].URL)
 	assert.Equal(t, "8.8.8.8", nsg.Nameservers[0].IP)
 	assert.Equal(t, []string{"1"}, nsg.GroupIds)
 }

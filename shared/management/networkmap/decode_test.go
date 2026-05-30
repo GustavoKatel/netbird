@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	protobuf "google.golang.org/protobuf/proto"
 
+	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/shared/management/networkmap/nmdata"
 	"github.com/netbirdio/netbird/shared/management/proto"
 )
@@ -58,4 +59,26 @@ func TestResourceCompactLegacyWireFormat(t *testing.T) {
 	encoded, err := protobuf.Marshal(&proto.ResourceCompact{Type: "peer", PeerIndexSet: true, PeerIndex: 7})
 	require.NoError(t, err)
 	assert.Equal(t, legacy, encoded)
+}
+
+func TestNameServerURLWireRoundTrip(t *testing.T) {
+	for _, ns := range []nbdns.NameServer{
+		{NSType: nbdns.DoHNameServerType, URL: "https://dns.example/dns-query"},
+		{NSType: nbdns.NextDNSNameServerType, URL: "abc123"},
+	} {
+		t.Run(ns.NSType.String(), func(t *testing.T) {
+			encoded := ConvertToProtoNameServerGroup(&nbdns.NameServerGroup{NameServers: []nbdns.NameServer{ns}})
+			wire, err := protobuf.Marshal(&proto.NameServerGroupRaw{Nameservers: encoded.NameServers})
+			require.NoError(t, err)
+			var received proto.NameServerGroupRaw
+			require.NoError(t, protobuf.Unmarshal(wire, &received))
+			require.Len(t, received.Nameservers, 1)
+			assert.Empty(t, received.Nameservers[0].IP)
+			decoded := decodeNameServerGroupRaw(&received)
+			require.Len(t, decoded.NameServers, 1)
+			assert.Equal(t, ns.URL, decoded.NameServers[0].URL)
+			assert.Equal(t, int(ns.NSType), decoded.NameServers[0].NSType)
+			assert.False(t, decoded.NameServers[0].IP.IsValid())
+		})
+	}
 }

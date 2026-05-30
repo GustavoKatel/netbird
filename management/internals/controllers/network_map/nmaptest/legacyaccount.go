@@ -343,6 +343,7 @@ func accountNSG(n *nmdata.NameServerGroup) *nbdns.NameServerGroup {
 			IP:     ns.IP,
 			NSType: nbdns.NameServerType(ns.NSType),
 			Port:   ns.Port,
+			URL:    ns.URL,
 		})
 	}
 	return &nbdns.NameServerGroup{

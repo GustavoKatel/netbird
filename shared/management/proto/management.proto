@@ -647,6 +647,9 @@ message NameServer {
   string IP = 1;
   int64  NSType = 2;
   int64  Port = 3;
+  // URL is used for non-IP nameserver types. For DoH it stores the full
+  // https endpoint; for NextDNS it stores the profile/config ID.
+  string URL = 4;
 }
 
 enum RuleProtocol {

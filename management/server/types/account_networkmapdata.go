@@ -366,6 +366,7 @@ func twinNSG(n *nbdns.NameServerGroup) *nmdata.NameServerGroup {
 			IP:     ns.IP,
 			NSType: int(ns.NSType),
 			Port:   ns.Port,
+			URL:    ns.URL,
 		})
 	}
 	return &nmdata.NameServerGroup{
