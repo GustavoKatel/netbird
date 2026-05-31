@@ -957,16 +957,11 @@ func (s *DefaultServer) buildMergedDomainHandler(domainGroup nsGroupsByDomain, p
 func (s *DefaultServer) filterNameServers(nameServers []nbdns.NameServer) []upstreamTarget {
 	var out []upstreamTarget
 	for _, ns := range nameServers {
-		if ns.NSType != nbdns.UDPNameServerType {
-			log.Warnf("skipping nameserver %s with type %s, this peer supports only %s",
-				ns.IP.String(), ns.NSType.String(), nbdns.UDPNameServerType.String())
+		target, ok := upstreamTargetFromNameServer(ns, s.service.RuntimeIP(), true)
+		if !ok {
 			continue
 		}
-		if ns.IP == s.service.RuntimeIP() {
-			log.Warnf("skipping nameserver %s as it matches our DNS server IP, preventing potential loop", ns.IP)
-			continue
-		}
-		out = append(out, udpUpstreamTarget(ns.AddrPort()))
+		out = append(out, target)
 	}
 	return out
 }
@@ -981,15 +976,44 @@ func (s *DefaultServer) usableNameServers(nameServers []nbdns.NameServer) []upst
 	}
 	var out []upstreamTarget
 	for _, ns := range nameServers {
-		if ns.NSType != nbdns.UDPNameServerType {
+		target, ok := upstreamTargetFromNameServer(ns, runtimeIP, false)
+		if !ok {
 			continue
 		}
-		if runtimeIP.IsValid() && ns.IP == runtimeIP {
-			continue
-		}
-		out = append(out, udpUpstreamTarget(ns.AddrPort()))
+		out = append(out, target)
 	}
 	return out
+}
+
+// upstreamTargetFromNameServer maps an nbdns.NameServer to its upstreamTarget
+// or returns ok=false when the entry is unusable: a UDP loop against our own
+// service IP, a non-IP type with no URL, or an unknown type. When warn is
+// true the rejection reason is logged; usable-only callers (health
+// projection) pass false to keep ticks silent.
+func upstreamTargetFromNameServer(ns nbdns.NameServer, runtimeIP netip.Addr, warn bool) (upstreamTarget, bool) {
+	switch ns.NSType {
+	case nbdns.UDPNameServerType:
+		if runtimeIP.IsValid() && ns.IP == runtimeIP {
+			if warn {
+				log.Warnf("skipping nameserver %s as it matches our DNS server IP, preventing potential loop", ns.IP)
+			}
+			return upstreamTarget{}, false
+		}
+		return udpUpstreamTarget(ns.AddrPort()), true
+	case nbdns.DoHNameServerType, nbdns.NextDNSNameServerType:
+		if ns.URL == "" {
+			if warn {
+				log.Warnf("skipping %s nameserver with empty URL", ns.NSType)
+			}
+			return upstreamTarget{}, false
+		}
+		return upstreamTarget{NSType: ns.NSType, URL: ns.URL}, true
+	default:
+		if warn {
+			log.Warnf("skipping nameserver with unsupported type %s", ns.NSType)
+		}
+		return upstreamTarget{}, false
+	}
 }
 
 func (s *DefaultServer) updateMux(muxUpdates []handlerWrapper) {

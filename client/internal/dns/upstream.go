@@ -172,6 +172,7 @@ type upstreamResolverBase struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	upstreamClient  upstreamClient
+	dohClient       *dohClient
 	upstreamServers []upstreamRace
 	domain          domain.Domain
 	upstreamTimeout time.Duration
@@ -240,6 +241,22 @@ func newUpstreamResolverBase(ctx context.Context, statusRecorder *peer.Status, d
 		domain:          d,
 		upstreamTimeout: UpstreamTimeout,
 		statusRecorder:  statusRecorder,
+		dohClient:       newDoHClient(statusRecorder),
+	}
+}
+
+// exchangeUpstream picks the right transport for the upstream target.
+// Centralizing the dispatch keeps DoH support out of the platform-
+// specific UDP exchange implementations.
+func (u *upstreamResolverBase) exchangeUpstream(ctx context.Context, target upstreamTarget, r *dns.Msg) (*dns.Msg, time.Duration, error) {
+	switch target.NSType {
+	case nbdns.DoHNameServerType, nbdns.NextDNSNameServerType:
+		if u.dohClient == nil {
+			return nil, 0, fmt.Errorf("doh client not configured")
+		}
+		return u.dohClient.exchange(ctx, target, r)
+	default:
+		return u.upstreamClient.exchange(ctx, target.AddrPort.String(), r)
 	}
 }
 
@@ -446,7 +463,7 @@ func (u *upstreamResolverBase) queryUpstream(parentCtx context.Context, r *dns.M
 	}
 
 	startTime := time.Now()
-	rm, _, err := u.upstreamClient.exchange(ctx, upstream.AddrPort.String(), r)
+	rm, _, err := u.exchangeUpstream(ctx, upstream, r)
 
 	if err != nil {
 		// A parent cancellation (e.g., another race won and the coordinator
