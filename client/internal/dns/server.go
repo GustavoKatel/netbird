@@ -824,6 +824,7 @@ func (s *DefaultServer) registerFallback() {
 		return
 	}
 	handler.selectedRoutes = s.selectedRoutes
+	handler.setDoHBootstrap(s.dohBootstrap)
 	handler.addRace(servers)
 
 	prev := s.fallbackHandler
@@ -832,6 +833,34 @@ func (s *DefaultServer) registerFallback() {
 	if prev != nil {
 		prev.Stop()
 	}
+}
+
+// dohBootstrap returns the nameservers DoH/NextDNS upstreams should use to
+// resolve their endpoint hostnames. Pulls from the same pre-takeover
+// snapshot that backs the PriorityFallback handler (Quad9 on iOS, OS push
+// on Android, parsed resolv.conf on desktop). Our own DNS service IP is
+// filtered out — querying it would loop straight back into the resolver
+// we're trying to bootstrap.
+func (s *DefaultServer) dohBootstrap() []netip.AddrPort {
+	if s.hostManager == nil {
+		return nil
+	}
+	originals := s.hostManager.getOriginalNameservers()
+	if len(originals) == 0 {
+		return nil
+	}
+	var runtimeIP netip.Addr
+	if s.service != nil {
+		runtimeIP = s.service.RuntimeIP()
+	}
+	out := make([]netip.AddrPort, 0, len(originals))
+	for _, ns := range originals {
+		if runtimeIP.IsValid() && ns == runtimeIP {
+			continue
+		}
+		out = append(out, netip.AddrPortFrom(ns, DefaultPort))
+	}
+	return out
 }
 
 func (s *DefaultServer) clearFallback() {
@@ -930,6 +959,7 @@ func (s *DefaultServer) buildMergedDomainHandler(domainGroup nsGroupsByDomain, p
 		return nil, fmt.Errorf("create upstream resolver: %v", err)
 	}
 	handler.selectedRoutes = s.selectedRoutes
+	handler.setDoHBootstrap(s.dohBootstrap)
 
 	for _, nsGroup := range domainGroup.groups {
 		servers := s.filterNameServers(nsGroup.NameServers)

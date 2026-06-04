@@ -308,6 +308,16 @@ func (u *upstreamResolverBase) setSelectedRoutes(selected func() route.HAMap) {
 	u.selectedRoutes = selected
 }
 
+// setDoHBootstrap wires the callback the DoH client uses to resolve
+// endpoint hostnames. Without it the DoH client can't dial hosts that
+// aren't already IPs (which is every public DoH endpoint). Safe to call
+// before any queries run; later changes are not picked up by cached entries.
+func (u *upstreamResolverBase) setDoHBootstrap(b func() []netip.AddrPort) {
+	if u.dohClient != nil {
+		u.dohClient.bootstrap = b
+	}
+}
+
 func (u *upstreamResolverBase) addRace(servers []upstreamTarget) {
 	if len(servers) == 0 {
 		return

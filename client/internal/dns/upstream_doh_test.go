@@ -1,13 +1,16 @@
 package dns
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -156,4 +159,56 @@ func TestDoHClient_EndpointURL_Errors(t *testing.T) {
 
 	_, err = c.endpointURL(upstreamTarget{NSType: nbdns.UDPNameServerType})
 	assert.Error(t, err, "udp target should not be routed through dohClient")
+}
+
+func TestDoHClient_ResolveBootstrap_NoNameservers(t *testing.T) {
+	c := newDoHClient(nil)
+
+	_, err := c.resolveBootstrap(t.Context(), "dns.example.com")
+	require.Error(t, err, "lookup with no bootstrap configured must fail loudly")
+	assert.Contains(t, err.Error(), "no bootstrap nameservers")
+
+	c.bootstrap = func() []netip.AddrPort { return nil }
+	_, err = c.resolveBootstrap(t.Context(), "dns.example.com")
+	require.Error(t, err, "empty bootstrap result must fail loudly")
+	assert.Contains(t, err.Error(), "no bootstrap nameservers")
+}
+
+// TestDoHClient_ResolveBootstrap_UsesProvidedNameservers verifies that
+// the bootstrap callback is actually consulted (and not e.g. ignored in
+// favor of the OS resolver). We point the callback at a local UDP
+// listener and assert it receives a DNS query.
+func TestDoHClient_ResolveBootstrap_UsesProvidedNameservers(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer pc.Close()
+
+	queried := make(chan struct{}, 1)
+	go func() {
+		buf := make([]byte, 512)
+		_, _, err := pc.ReadFrom(buf)
+		if err == nil {
+			select {
+			case queried <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	c := newDoHClient(nil)
+	bootstrapAddr := netip.MustParseAddrPort(pc.LocalAddr().String())
+	c.bootstrap = func() []netip.AddrPort { return []netip.AddrPort{bootstrapAddr} }
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	_, err = c.resolveBootstrap(ctx, "dns.example.com")
+	// We don't reply, so the lookup must fail — but the listener must
+	// have observed at least one packet, proving the callback was used.
+	assert.Error(t, err)
+
+	select {
+	case <-queried:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap nameserver was never queried")
+	}
 }

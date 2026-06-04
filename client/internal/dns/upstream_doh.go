@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +22,9 @@ import (
 )
 
 const (
-	dohContentType    = "application/dns-message"
-	nextdnsBaseURL    = "https://dns.nextdns.io/"
-	bootstrapResolver = "1.1.1.1:53"
-	dohProtocol       = "doh"
+	dohContentType = "application/dns-message"
+	nextdnsBaseURL = "https://dns.nextdns.io/"
+	dohProtocol    = "doh"
 )
 
 // dohClient performs DoH (RFC 8484) exchanges. A single client is shared by
@@ -31,13 +32,20 @@ const (
 //
 // Bootstrap resolution: DoH endpoints are public hostnames (e.g.
 // dns.nextdns.io). Resolving them through the OS resolver would loop when
-// netbird itself is the OS resolver. We sidestep that by dialing a fixed
-// bootstrap server (1.1.1.1) for hostname lookups and caching the result.
+// netbird itself is the OS resolver. The bootstrap callback returns the
+// nameservers used to break that loop — typically the pre-takeover snapshot
+// from hostManager.getOriginalNameservers(), filtered to drop our own
+// service IP. The dohClient queries each in order until one answers and
+// caches the result per host.
 type dohClient struct {
 	httpClient *http.Client
 	// deviceFn returns the device identifier appended to NextDNS requests.
 	// Tests inject a stub; production wires it to the local peer FQDN.
 	deviceFn func() string
+	// bootstrap returns the nameservers to use for resolving DoH endpoint
+	// hostnames. Set by the resolver after construction; without it the
+	// client cannot resolve non-IP hosts.
+	bootstrap func() []netip.AddrPort
 
 	bootstrapMu    sync.Mutex
 	bootstrapCache map[string][]net.IP
@@ -209,26 +217,42 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 	}
 	c.bootstrapMu.Unlock()
 
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "udp", bootstrapResolver)
-		},
+	if c.bootstrap == nil {
+		return nil, fmt.Errorf("bootstrap lookup %s: no bootstrap nameservers configured", host)
+	}
+	servers := c.bootstrap()
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("bootstrap lookup %s: no bootstrap nameservers available", host)
 	}
 
-	ips, err := resolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap lookup %s: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("bootstrap lookup %s: no addresses", host)
+	var lookupErrs []error
+	for _, server := range servers {
+		bootstrapAddr := server.String()
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "udp", bootstrapAddr)
+			},
+		}
+
+		ips, err := resolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			lookupErrs = append(lookupErrs, fmt.Errorf("%s: %w", bootstrapAddr, err))
+			continue
+		}
+		if len(ips) == 0 {
+			lookupErrs = append(lookupErrs, fmt.Errorf("%s: no addresses", bootstrapAddr))
+			continue
+		}
+
+		c.bootstrapMu.Lock()
+		c.bootstrapCache[host] = ips
+		c.bootstrapMu.Unlock()
+
+		log.Debugf("doh bootstrap resolved %s to %v via %s", host, ips, bootstrapAddr)
+		return ips, nil
 	}
 
-	c.bootstrapMu.Lock()
-	c.bootstrapCache[host] = ips
-	c.bootstrapMu.Unlock()
-
-	log.Debugf("doh bootstrap resolved %s to %v", host, ips)
-	return ips, nil
+	return nil, fmt.Errorf("bootstrap lookup %s failed via %d nameservers: %w", host, len(servers), errors.Join(lookupErrs...))
 }
