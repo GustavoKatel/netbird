@@ -18,6 +18,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/netbirdio/netbird/client/internal/peer"
+	nbnet "github.com/netbirdio/netbird/client/net"
 	nbdns "github.com/netbirdio/netbird/dns"
 )
 
@@ -182,12 +183,22 @@ func nextDNSDeviceID(fqdn string) string {
 
 // dialContext resolves the host using a fixed bootstrap nameserver and dials
 // the resulting IP directly, bypassing the OS resolver.
+//
+// The dialer comes from nbnet.NewDialer so the outbound TCP connection
+// bypasses the netbird tunnel: fwmark on Linux, IP_BOUND_IF on macOS,
+// IP_UNICAST_IF on Windows, VpnService.protect() on Android. On platforms
+// without a tunnel-bypass implementation (iOS / FreeBSD / JS) it falls
+// back to a plain net.Dialer, which is fine in default split-tunnel mode.
+// Without this, the HTTPS connection to dns.nextdns.io (or any other
+// public DoH endpoint) would be captured by netbird's own VPN interface
+// and loop back into the resolver.
 func (c *dohClient) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	d := &net.Dialer{Timeout: 5 * time.Second}
+	d := nbnet.NewDialer()
+	d.Timeout = 5 * time.Second
 
 	if ip := net.ParseIP(host); ip != nil {
 		return d.DialContext(ctx, network, addr)
@@ -228,10 +239,12 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 	var lookupErrs []error
 	for _, server := range servers {
 		bootstrapAddr := server.String()
+		// Same nbnet.NewDialer rationale as in dialContext: the UDP probe to
+		// the bootstrap nameserver must bypass the netbird tunnel.
 		resolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				var d net.Dialer
+				d := nbnet.NewDialer()
 				return d.DialContext(ctx, "udp", bootstrapAddr)
 			},
 		}
