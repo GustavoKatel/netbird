@@ -38,7 +38,8 @@ type Client struct {
 
 // clientOptions is what the ClientOption values assemble.
 type clientOptions struct {
-	name string
+	rootCA string
+	name   string
 }
 
 // ClientOption adjusts how StartClient runs the agent.
@@ -53,6 +54,11 @@ type ClientOption func(*clientOptions)
 // is shared, and two containers cannot hold the same alias on one network.
 func WithClientName(name string) ClientOption {
 	return func(o *clientOptions) { o.name = name }
+}
+
+// WithClientRootCA trusts a test certificate authority for outbound TLS.
+func WithClientRootCA(path string) ClientOption {
+	return func(o *clientOptions) { o.rootCA = path }
 }
 
 // StartClient builds the client image and runs it on the combined server's
@@ -93,6 +99,13 @@ func StartClient(ctx context.Context, c *Combined, setupKey string, opts ...Clie
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.CapAdd = append(hc.CapAdd, "NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 		},
+	}
+
+	if o.rootCA != "" {
+		req.Files = append(req.Files, testcontainers.ContainerFile{
+			HostFilePath: o.rootCA, ContainerFilePath: "/etc/ssl/e2e-ca.pem", FileMode: 0644,
+		})
+		req.Env["SSL_CERT_FILE"] = "/etc/ssl/e2e-ca.pem"
 	}
 
 	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -455,4 +468,20 @@ func containerLogs(ctx context.Context, c testcontainers.Container) string {
 	defer r.Close()
 	b, _ := io.ReadAll(io.LimitReader(r, 4<<20))
 	return string(b)
+}
+
+// LookupDNS resolves a name using the client's configured system DNS.
+func (cl *Client) LookupDNS(ctx context.Context, name string) (string, error) {
+	code, reader, err := cl.container.Exec(ctx, []string{"nslookup", name}, tcexec.Multiplexed())
+	if err != nil {
+		return "", err
+	}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return string(out), fmt.Errorf("nslookup exited %d: %s", code, out)
+	}
+	return string(out), nil
 }
