@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/hashicorp/go-multierror"
 	log "github.com/sirupsen/logrus"
@@ -34,7 +35,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return nil, fmt.Errorf("d.Dialer.DialContext: %w", err)
 	}
 
-	// Wrap the connection in Conn to handle Close with hooks
+	if udp, ok := conn.(*net.UDPConn); ok {
+		// Preserve net.PacketConn so net.Resolver uses datagram framing.
+		return &UDPConn{UDPConn: udp, ID: connID, seenAddrs: &sync.Map{}}, nil
+	}
 	return &Conn{Conn: conn, ID: connID}, nil
 }
 

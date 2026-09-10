@@ -174,41 +174,57 @@ func TestDoHClient_ResolveBootstrap_NoNameservers(t *testing.T) {
 	assert.Contains(t, err.Error(), "no bootstrap nameservers")
 }
 
-// TestDoHClient_ResolveBootstrap_UsesProvidedNameservers verifies that
-// the bootstrap callback is actually consulted (and not e.g. ignored in
-// favor of the OS resolver). We point the callback at a local UDP
-// listener and assert it receives a DNS query.
 func TestDoHClient_ResolveBootstrap_UsesProvidedNameservers(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer pc.Close()
-
-	queried := make(chan struct{}, 1)
-	go func() {
-		buf := make([]byte, 512)
-		_, _, err := pc.ReadFrom(buf)
-		if err == nil {
-			select {
-			case queried <- struct{}{}:
-			default:
-			}
+	for _, truncate := range []bool{false, true} {
+		name := "UDP"
+		if truncate {
+			name = "TCP fallback"
 		}
-	}()
+		t.Run(name, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			packetConn, err := net.ListenPacket("udp", listener.Addr().String())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = packetConn.Close() })
 
-	c := newDoHClient(nil)
-	bootstrapAddr := netip.MustParseAddrPort(pc.LocalAddr().String())
-	c.bootstrap = func() []netip.AddrPort { return []netip.AddrPort{bootstrapAddr} }
-
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
-	defer cancel()
-	_, err = c.resolveBootstrap(ctx, "dns.example.com")
-	// We don't reply, so the lookup must fail — but the listener must
-	// have observed at least one packet, proving the callback was used.
-	assert.Error(t, err)
-
-	select {
-	case <-queried:
-	case <-time.After(time.Second):
-		t.Fatal("bootstrap nameserver was never queried")
+			handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+				resp := new(dns.Msg).SetReply(req)
+				if _, udp := w.RemoteAddr().(*net.UDPAddr); udp && truncate {
+					resp.Truncated = true
+				} else if req.Question[0].Qtype == dns.TypeA {
+					resp.Answer = []dns.RR{&dns.A{
+						Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+						A:   net.IPv4(203, 0, 113, 42),
+					}}
+				}
+				assert.NoError(t, w.WriteMsg(resp))
+			})
+			for _, server := range []*dns.Server{
+				{PacketConn: packetConn, Handler: handler},
+				{Listener: listener, Handler: handler},
+			} {
+				ready := make(chan struct{})
+				done := make(chan error, 1)
+				server.NotifyStartedFunc = func() { close(ready) }
+				go func() { done <- server.ActivateAndServe() }()
+				<-ready
+				t.Cleanup(func() {
+					assert.NoError(t, server.Shutdown())
+					assert.NoError(t, <-done)
+				})
+			}
+			c := newDoHClient(nil)
+			bootstrapAddr := netip.MustParseAddrPort(listener.Addr().String())
+			c.bootstrap = func() []netip.AddrPort { return []netip.AddrPort{bootstrapAddr} }
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			ips, err := c.resolveBootstrap(ctx, "dns.example.com")
+			require.NoError(t, err)
+			require.Len(t, ips, 1, "bootstrap must return the local server's A record")
+			addr, ok := netip.AddrFromSlice(ips[0])
+			require.True(t, ok, "bootstrap must return a valid IP")
+			assert.Equal(t, netip.MustParseAddr("203.0.113.42"), addr.Unmap(), "bootstrap must use the configured nameserver")
+		})
 	}
 }

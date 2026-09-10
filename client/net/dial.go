@@ -5,12 +5,12 @@ package net
 import (
 	"fmt"
 	"net"
-	"sync"
 
 	"github.com/pion/transport/v3"
 	log "github.com/sirupsen/logrus"
 )
 
+// DialUDP connects to a UDP peer while preserving routing hooks.
 func DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, error) {
 	if CustomRoutingDisabled() {
 		return net.DialUDP(network, laddr, raddr)
@@ -28,16 +28,8 @@ func DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, erro
 	case *net.UDPConn:
 		// Advanced routing: plain connection
 		return c, nil
-	case *Conn:
-		// Legacy routing: wrapped connection preserves close hooks
-		udpConn, ok := c.Conn.(*net.UDPConn)
-		if !ok {
-			if err := conn.Close(); err != nil {
-				log.Errorf("Failed to close connection: %v", err)
-			}
-			return nil, fmt.Errorf("expected UDP connection, got %T", c.Conn)
-		}
-		return &UDPConn{UDPConn: udpConn, ID: c.ID, seenAddrs: &sync.Map{}}, nil
+	case *UDPConn:
+		return c, nil
 	}
 
 	if err := conn.Close(); err != nil {

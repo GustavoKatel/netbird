@@ -239,13 +239,12 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 	var lookupErrs []error
 	for _, server := range servers {
 		bootstrapAddr := server.String()
-		// Same nbnet.NewDialer rationale as in dialContext: the UDP probe to
-		// the bootstrap nameserver must bypass the netbird tunnel.
+		// Bootstrap connections must bypass the overlay, just like DoH connections.
 		resolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 				d := nbnet.NewDialer()
-				return d.DialContext(ctx, "udp", bootstrapAddr)
+				return d.DialContext(ctx, network, bootstrapAddr)
 			},
 		}
 
