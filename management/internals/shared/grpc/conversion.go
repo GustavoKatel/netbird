@@ -166,7 +166,7 @@ func ToSyncResponse(ctx context.Context, config *nbconfig.Config, httpConfig *nb
 		NetworkMap: &proto.NetworkMap{
 			Serial:     networkMap.Network.CurrentSerial(),
 			Routes:     networkmap.ToProtocolRoutes(networkMap.Routes),
-			DNSConfig:  networkmap.ToProtocolDNSConfig(networkMap.DNSConfig, dnsCache, dnsFwdPort),
+			DNSConfig:  networkmap.DNSConfigForPeer(networkmap.ToProtocolDNSConfig(networkMap.DNSConfig, dnsCache, dnsFwdPort), peer.HasCapability(nmdata.PeerCapabilityDNSOverHTTPS)),
 			PeerConfig: toPeerConfig(peer, networkMap.Network, dnsName, settings, httpConfig, deviceFlowConfig, networkMap.EnableSSH, networkMap.ForceRoutingPeerDNSResolution),
 		},
 		Checks: toProtocolChecks(ctx, checks),

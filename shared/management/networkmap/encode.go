@@ -339,3 +339,36 @@ func BuildAuthorizedUsersProto(ctx context.Context, authorizedUsers map[string]m
 
 	return hashedUsers, machineUsers
 }
+
+// DNSConfigForPeer omits unsupported nameservers without modifying cached groups.
+func DNSConfigForPeer(config *proto.DNSConfig, supportsDoH bool) *proto.DNSConfig {
+	if supportsDoH || config == nil {
+		return config
+	}
+	filtered := goproto.Clone(config).(*proto.DNSConfig)
+	groups := filtered.NameServerGroups
+	filtered.NameServerGroups = nil
+	for _, group := range groups {
+		servers := NameServersForPeer(group.NameServers, false)
+		if len(servers) == 0 {
+			continue
+		}
+		group.NameServers = servers
+		filtered.NameServerGroups = append(filtered.NameServerGroups, group)
+	}
+	return filtered
+}
+
+// NameServersForPeer retains only transports understood by the receiving client.
+func NameServersForPeer(servers []*proto.NameServer, supportsDoH bool) []*proto.NameServer {
+	if supportsDoH {
+		return servers
+	}
+	var filtered []*proto.NameServer
+	for _, server := range servers {
+		if server.GetNSType() == int64(nbdns.UDPNameServerType) && server.GetIP() != "" {
+			filtered = append(filtered, server)
+		}
+	}
+	return filtered
+}

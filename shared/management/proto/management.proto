@@ -251,6 +251,8 @@ enum PeerCapability {
   PeerCapabilityIPv6Overlay = 2;
   // Client receives NetworkMap as components and assembles it locally.
   PeerCapabilityComponentNetworkMap = 3;
+  // Understands URL-based DoH and NextDNS nameservers.
+  PeerCapabilityDNSOverHTTPS = 4;
 }
 
 // PeerSystemMeta is machine meta data like OS and version.

@@ -604,6 +604,7 @@ func TestEncodeNetworkMapEnvelope_ResourceOnlyPolicyShippedAndIndexed(t *testing
 
 func TestEncodeNetworkMapEnvelope_NameServerGroups(t *testing.T) {
 	c := newTestComponents()
+	c.GetPeerInfo(c.PeerID).Meta.Capabilities = append(c.GetPeerInfo(c.PeerID).Meta.Capabilities, nmdata.PeerCapabilityDNSOverHTTPS)
 	c.NameServerGroups = []*nmdata.NameServerGroup{{
 		ID: "nsg-1", PublicID: "50", Name: "Main", Description: "primary",
 		NameServers: []nmdata.NameServer{{
@@ -627,6 +628,15 @@ func TestEncodeNetworkMapEnvelope_NameServerGroups(t *testing.T) {
 	assert.Equal(t, "abc123", nsg.Nameservers[2].URL)
 	assert.Equal(t, "8.8.8.8", nsg.Nameservers[0].IP)
 	assert.Equal(t, []string{"1"}, nsg.GroupIds)
+	c.GetPeerInfo(c.PeerID).Meta.Capabilities = nil
+	legacy := EncodeNetworkMapEnvelope(ComponentsEnvelopeInput{Components: c}).GetFull()
+	require.Len(t, legacy.NameserverGroups, 1, "mixed groups must preserve UDP")
+	require.Len(t, legacy.NameserverGroups[0].Nameservers, 1, "old clients must receive only UDP")
+	assert.Equal(t, "8.8.8.8", legacy.NameserverGroups[0].Nameservers[0].IP, "old decoder must receive a valid IP")
+	c.NameServerGroups[0].NameServers = c.NameServerGroups[0].NameServers[1:]
+	legacy = EncodeNetworkMapEnvelope(ComponentsEnvelopeInput{Components: c}).GetFull()
+	assert.Empty(t, legacy.NameserverGroups, "unsupported groups must be omitted")
+
 }
 
 func TestEncodeNetworkMapEnvelope_PostureFailedPeers(t *testing.T) {

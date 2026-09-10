@@ -1060,6 +1060,7 @@ func infoToMetaData(info *system.Info) *proto.PeerSystemMeta {
 func peerCapabilities(info system.Info) []proto.PeerCapability {
 	caps := []proto.PeerCapability{
 		proto.PeerCapability_PeerCapabilitySourcePrefixes,
+		proto.PeerCapability_PeerCapabilityDNSOverHTTPS,
 	}
 	if !info.DisableIPv6 {
 		caps = append(caps, proto.PeerCapability_PeerCapabilityIPv6Overlay)
