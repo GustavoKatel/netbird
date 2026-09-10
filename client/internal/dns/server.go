@@ -156,8 +156,10 @@ type DefaultServer struct {
 	mgmtCacheResolver *mgmt.Resolver
 
 	// permanent related properties
-	permanent      bool
-	hostsDNSHolder *hostsDNSHolder
+	permanent           bool
+	hostsDNSHolder      *hostsDNSHolder
+	dohBootstrapMu      sync.RWMutex
+	dohBootstrapServers []netip.AddrPort
 
 	// fallbackHandler is the upstream resolver currently registered at
 	// PriorityFallback. Tracked so registerFallback can Stop() the previous
@@ -544,6 +546,7 @@ func (s *DefaultServer) disableDNS() (retErr error) {
 	}
 
 	s.hostManager = &noopHostConfigurator{}
+	s.setDoHBootstrapServers(nil)
 
 	return nil
 }
@@ -804,6 +807,7 @@ func (s *DefaultServer) registerFallback() {
 		servers = append(servers, udpUpstreamTarget(netip.AddrPortFrom(ns, DefaultPort)))
 	}
 
+	s.setDoHBootstrapServers(targetsToAddrPorts(servers))
 	if len(servers) == 0 {
 		log.Debugf("no fallback upstreams to register; clearing PriorityFallback handler")
 		s.clearFallback()
@@ -835,32 +839,17 @@ func (s *DefaultServer) registerFallback() {
 	}
 }
 
-// dohBootstrap returns the nameservers DoH/NextDNS upstreams should use to
-// resolve their endpoint hostnames. Pulls from the same pre-takeover
-// snapshot that backs the PriorityFallback handler (Quad9 on iOS, OS push
-// on Android, parsed resolv.conf on desktop). Our own DNS service IP is
-// filtered out — querying it would loop straight back into the resolver
-// we're trying to bootstrap.
+// dohBootstrap returns an independent snapshot without taking the configuration lock.
 func (s *DefaultServer) dohBootstrap() []netip.AddrPort {
-	if s.hostManager == nil {
-		return nil
-	}
-	originals := s.hostManager.getOriginalNameservers()
-	if len(originals) == 0 {
-		return nil
-	}
-	var runtimeIP netip.Addr
-	if s.service != nil {
-		runtimeIP = s.service.RuntimeIP()
-	}
-	out := make([]netip.AddrPort, 0, len(originals))
-	for _, ns := range originals {
-		if runtimeIP.IsValid() && ns == runtimeIP {
-			continue
-		}
-		out = append(out, netip.AddrPortFrom(ns, DefaultPort))
-	}
-	return out
+	s.dohBootstrapMu.RLock()
+	defer s.dohBootstrapMu.RUnlock()
+	return slices.Clone(s.dohBootstrapServers)
+}
+
+func (s *DefaultServer) setDoHBootstrapServers(servers []netip.AddrPort) {
+	s.dohBootstrapMu.Lock()
+	defer s.dohBootstrapMu.Unlock()
+	s.dohBootstrapServers = slices.Clone(servers)
 }
 
 func (s *DefaultServer) clearFallback() {

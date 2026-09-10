@@ -3745,7 +3745,7 @@ type Nameserver struct {
 	// DNS-over-HTTPS requests against the URL in the `url` field.
 	// `nextdns` is shorthand for a NextDNS profile; the client builds
 	// the request URL from the profile/config ID stored in `url` and
-	// appends the device name as a query parameter.
+	// identifies the device through X-Device-Name and X-Device-Id HTTP headers.
 	NsType NameserverNsType `json:"ns_type"`
 
 	// Port Nameserver Port. Required for `udp` nameservers; ignored otherwise.
@@ -3761,7 +3761,7 @@ type Nameserver struct {
 // DNS-over-HTTPS requests against the URL in the `url` field.
 // `nextdns` is shorthand for a NextDNS profile; the client builds
 // the request URL from the profile/config ID stored in `url` and
-// appends the device name as a query parameter.
+// identifies the device through X-Device-Name and X-Device-Id HTTP headers.
 type NameserverNsType string
 
 // NameserverGroup defines model for NameserverGroup.

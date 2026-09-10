@@ -2144,7 +2144,7 @@ components:
             DNS-over-HTTPS requests against the URL in the `url` field.
             `nextdns` is shorthand for a NextDNS profile; the client builds
             the request URL from the profile/config ID stored in `url` and
-            appends the device name as a query parameter.
+            identifies the device through X-Device-Name and X-Device-Id HTTP headers.
           type: string
           enum: [ "udp", "doh", "nextdns" ]
           example: udp

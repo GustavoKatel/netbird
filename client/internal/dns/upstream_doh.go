@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -28,16 +29,9 @@ const (
 	dohProtocol    = "doh"
 )
 
-// dohClient performs DoH (RFC 8484) exchanges. A single client is shared by
-// every upstream that uses the DoH or NextDNS nameserver type.
-//
-// Bootstrap resolution: DoH endpoints are public hostnames (e.g.
-// dns.nextdns.io). Resolving them through the OS resolver would loop when
-// netbird itself is the OS resolver. The bootstrap callback returns the
-// nameservers used to break that loop — typically the pre-takeover snapshot
-// from hostManager.getOriginalNameservers(), filtered to drop our own
-// service IP. The dohClient queries each in order until one answers and
-// caches the result per host.
+// dohClient shares HTTP connections across DoH and NextDNS upstreams.
+// Bootstrap resolution uses the original host nameservers to avoid querying
+// NetBird's own resolver after it takes over system DNS.
 type dohClient struct {
 	httpClient *http.Client
 	// deviceFn returns the device identifier appended to NextDNS requests.
@@ -47,18 +41,15 @@ type dohClient struct {
 	// hostnames. Set by the resolver after construction; without it the
 	// client cannot resolve non-IP hosts.
 	bootstrap func() []netip.AddrPort
-
-	bootstrapMu    sync.Mutex
-	bootstrapCache map[string][]net.IP
 }
 
 func newDoHClient(statusRecorder *peer.Status) *dohClient {
 	c := &dohClient{
-		deviceFn:       deviceFnFromStatus(statusRecorder),
-		bootstrapCache: make(map[string][]net.IP),
+		deviceFn: deviceFnFromStatus(statusRecorder),
 	}
 	c.httpClient = &http.Client{
-		Timeout: ClientTimeout,
+		Timeout:       ClientTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
 			DialContext:           c.dialContext,
 			TLSHandshakeTimeout:   3 * time.Second,
@@ -106,11 +97,18 @@ func (c *dohClient) exchange(ctx context.Context, target upstreamTarget, r *dns.
 		return nil, time.Since(start), fmt.Errorf("doh status %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != dohContentType {
+		return nil, time.Since(start), fmt.Errorf("unexpected doh content type %q", resp.Header.Get("Content-Type"))
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, dns.MaxMsgSize+1))
 	if err != nil {
 		return nil, time.Since(start), fmt.Errorf("read doh response: %w", err)
 	}
 
+	if len(respBody) > dns.MaxMsgSize {
+		return nil, time.Since(start), fmt.Errorf("doh response exceeds %d bytes", dns.MaxMsgSize)
+	}
 	rm := new(dns.Msg)
 	if err := rm.Unpack(respBody); err != nil {
 		return nil, time.Since(start), fmt.Errorf("unpack doh response: %w", err)
@@ -120,21 +118,29 @@ func (c *dohClient) exchange(ctx context.Context, target upstreamTarget, r *dns.
 	return rm, time.Since(start), nil
 }
 
-// endpointURL builds the request URL for the upstream. For NextDNS targets it
-// expands the stored config ID into the canonical NextDNS URL. Device
-// identification happens via HTTP headers in setNextDNSDeviceHeaders, not via
-// the URL — NextDNS's official client uses X-Device-{Name,Id,Ip,Model} and
-// ignores query parameters.
+// endpointURL expands NextDNS profile IDs and validates encrypted endpoints.
 func (c *dohClient) endpointURL(target upstreamTarget) (string, error) {
 	switch target.NSType {
 	case nbdns.DoHNameServerType:
 		if target.URL == "" {
 			return "", fmt.Errorf("doh upstream missing url")
 		}
-		return target.URL, nil
+		endpoint, err := url.Parse(target.URL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Fragment != "" {
+			return "", fmt.Errorf("invalid HTTPS doh endpoint")
+		}
+		return endpoint.String(), nil
 	case nbdns.NextDNSNameServerType:
 		if target.URL == "" {
 			return "", fmt.Errorf("nextdns upstream missing config id")
+		}
+		if len(target.URL) != 6 || strings.ContainsAny(target.URL, "/?#%") {
+			return "", fmt.Errorf("invalid nextdns config id")
+		}
+		for _, ch := range target.URL {
+			if !strings.ContainsRune("0123456789abcdef", ch) {
+				return "", fmt.Errorf("invalid nextdns config id")
+			}
 		}
 		return nextdnsBaseURL + target.URL, nil
 	default:
@@ -149,14 +155,8 @@ func deviceFnFromStatus(statusRecorder *peer.Status) func() string {
 	return func() string { return statusRecorder.GetLocalPeerState().FQDN }
 }
 
-// setNextDNSDeviceHeaders adds NextDNS's per-request device identification
-// headers. NextDNS uses X-Device-Name for the dashboard label and X-Device-Id
-// as the stable per-device handle (queries with the same id are grouped
-// together). We derive both from the local peer's FQDN: the full FQDN goes
-// into the name (so it's recognizable), the short hostname into the id (so
-// it survives FQDN suffix changes within an account).
-//
-// Reference: github.com/nextdns/nextdns/resolver/doh.go
+// NextDNS identifies devices through headers, as in nextdns/nextdns/resolver/doh.go.
+// The short hostname keeps the device ID stable across account renames.
 func (c *dohClient) setNextDNSDeviceHeaders(req *http.Request) {
 	if c.deviceFn == nil {
 		return
@@ -181,17 +181,8 @@ func nextDNSDeviceID(fqdn string) string {
 	return fqdn
 }
 
-// dialContext resolves the host using a fixed bootstrap nameserver and dials
-// the resulting IP directly, bypassing the OS resolver.
-//
-// The dialer comes from nbnet.NewDialer so the outbound TCP connection
-// bypasses the netbird tunnel: fwmark on Linux, IP_BOUND_IF on macOS,
-// IP_UNICAST_IF on Windows, VpnService.protect() on Android. On platforms
-// without a tunnel-bypass implementation (iOS / FreeBSD / JS) it falls
-// back to a plain net.Dialer, which is fine in default split-tunnel mode.
-// Without this, the HTTPS connection to dns.nextdns.io (or any other
-// public DoH endpoint) would be captured by netbird's own VPN interface
-// and loop back into the resolver.
+// dialContext uses the original nameservers and tunnel-bypassing sockets
+// to avoid feeding an endpoint lookup back into the overlay DNS resolver.
 func (c *dohClient) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -200,7 +191,7 @@ func (c *dohClient) dialContext(ctx context.Context, network, addr string) (net.
 	d := nbnet.NewDialer()
 	d.Timeout = 5 * time.Second
 
-	if ip := net.ParseIP(host); ip != nil {
+	if _, err := netip.ParseAddr(host); err == nil {
 		return d.DialContext(ctx, network, addr)
 	}
 
@@ -210,8 +201,10 @@ func (c *dohClient) dialContext(ctx context.Context, network, addr string) (net.
 	}
 
 	var lastErr error
-	for _, ip := range ips {
-		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	for i, ip := range ips {
+		attempt, cancel := dohAttemptContext(ctx, len(ips)-i)
+		conn, err := d.DialContext(attempt, network, net.JoinHostPort(ip.String(), port))
+		cancel()
 		if err == nil {
 			return conn, nil
 		}
@@ -220,14 +213,7 @@ func (c *dohClient) dialContext(ctx context.Context, network, addr string) (net.
 	return nil, fmt.Errorf("dial %s: all bootstrap IPs failed: %w", addr, lastErr)
 }
 
-func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP, error) {
-	c.bootstrapMu.Lock()
-	if cached, ok := c.bootstrapCache[host]; ok {
-		c.bootstrapMu.Unlock()
-		return cached, nil
-	}
-	c.bootstrapMu.Unlock()
-
+func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]netip.Addr, error) {
 	if c.bootstrap == nil {
 		return nil, fmt.Errorf("bootstrap lookup %s: no bootstrap nameservers configured", host)
 	}
@@ -237,7 +223,7 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 	}
 
 	var lookupErrs []error
-	for _, server := range servers {
+	for i, server := range servers {
 		bootstrapAddr := server.String()
 		// Bootstrap connections must bypass the overlay, just like DoH connections.
 		resolver := &net.Resolver{
@@ -248,7 +234,9 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 			},
 		}
 
-		ips, err := resolver.LookupIP(ctx, "ip", host)
+		attempt, cancel := dohAttemptContext(ctx, len(servers)-i+1)
+		ips, err := resolver.LookupNetIP(attempt, "ip", host)
+		cancel()
 		if err != nil {
 			lookupErrs = append(lookupErrs, fmt.Errorf("%s: %w", bootstrapAddr, err))
 			continue
@@ -258,13 +246,21 @@ func (c *dohClient) resolveBootstrap(ctx context.Context, host string) ([]net.IP
 			continue
 		}
 
-		c.bootstrapMu.Lock()
-		c.bootstrapCache[host] = ips
-		c.bootstrapMu.Unlock()
-
+		for i := range ips {
+			ips[i] = ips[i].Unmap()
+		}
 		log.Debugf("doh bootstrap resolved %s to %v via %s", host, ips, bootstrapAddr)
 		return ips, nil
 	}
 
 	return nil, fmt.Errorf("bootstrap lookup %s failed via %d nameservers: %w", host, len(servers), errors.Join(lookupErrs...))
+}
+
+// dohAttemptContext reserves time for later servers and the HTTPS connection.
+func dohAttemptContext(ctx context.Context, remaining int) (context.Context, context.CancelFunc) {
+	timeout := time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, time.Until(deadline)/time.Duration(remaining))
+	}
+	return context.WithTimeout(ctx, timeout)
 }

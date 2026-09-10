@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +30,7 @@ func TestDoHClient_Exchange_GenericDoH(t *testing.T) {
 	question := "example.com."
 	answer := "203.0.113.42"
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, dohContentType, r.Header.Get("Content-Type"))
 		assert.Empty(t, r.URL.RawQuery, "generic DoH must not inject device parameter")
@@ -74,64 +72,39 @@ func TestDoHClient_Exchange_GenericDoH(t *testing.T) {
 
 func TestDoHClient_Exchange_NextDNS_URLAndHeaders(t *testing.T) {
 	const fqdn = "laptop.peers.netbird.cloud"
-	const configID = "abc123"
-
-	// endpointURL: just the config-id-prefixed URL, no query params.
-	c := newDoHClient(nil)
-	c.deviceFn = func() string { return fqdn }
-
-	got, err := c.endpointURL(upstreamTarget{NSType: nbdns.NextDNSNameServerType, URL: configID})
-	require.NoError(t, err)
-
-	parsed, err := url.Parse(got)
-	require.NoError(t, err)
-	assert.Equal(t, "dns.nextdns.io", parsed.Host)
-	assert.True(t, strings.HasSuffix(parsed.Path, "/"+configID), "path should include config id, got %s", parsed.Path)
-	assert.Empty(t, parsed.RawQuery, "NextDNS device info goes via headers, not query params")
-
-	// exchange path: the upstream sees X-Device-Name / X-Device-Id headers.
-	var capturedHeader http.Header
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedHeader = r.Header.Clone()
-		body, _ := io.ReadAll(r.Body)
-		req := new(dns.Msg)
-		_ = req.Unpack(body)
-		resp := new(dns.Msg)
-		resp.SetReply(req)
-		out, _ := resp.Pack()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "dns.nextdns.io", r.Host, "request must retain the NextDNS authority")
+		assert.Equal(t, "/abc123", r.URL.Path, "profile must be in the request path")
+		assert.Equal(t, fqdn, r.Header.Get("X-Device-Name"), "request must identify the device")
+		assert.Equal(t, "laptop", r.Header.Get("X-Device-Id"), "request must carry the short device ID")
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+		query := new(dns.Msg)
+		if !assert.NoError(t, query.Unpack(body)) {
+			return
+		}
+		response, err := new(dns.Msg).SetReply(query).Pack()
+		if !assert.NoError(t, err) {
+			return
+		}
 		w.Header().Set("Content-Type", dohContentType)
-		_, _ = w.Write(out)
+		_, err = w.Write(response)
+		assert.NoError(t, err)
 	}))
-	defer server.Close()
-
-	// Override endpointURL by pointing the NextDNS target's URL at the test
-	// server. We test the exchange-level header injection directly by faking
-	// a target that resolves to the test server.
-	cTest := newTestDoHClient(t, server)
-	cTest.deviceFn = func() string { return fqdn }
-	target := upstreamTarget{NSType: nbdns.NextDNSNameServerType, URL: configID}
-	// Patch the endpoint by overriding nextdnsBaseURL via a custom test helper:
-	// instead, exercise the exchange via DoHNameServerType with a manual URL
-	// and explicitly call setNextDNSDeviceHeaders on a sample request.
-	req, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	t.Cleanup(server.Close)
+	c := newDoHClient(nil)
+	t.Cleanup(c.httpClient.CloseIdleConnections)
+	c.deviceFn = func() string { return fqdn }
+	transport := c.httpClient.Transport.(*http.Transport)
+	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.TLSClientConfig.ServerName = "example.com"
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return new(net.Dialer).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	_, _, err := c.exchange(t.Context(), upstreamTarget{NSType: nbdns.NextDNSNameServerType, URL: "abc123"}, new(dns.Msg).SetQuestion("example.com.", dns.TypeA))
 	require.NoError(t, err)
-	cTest.setNextDNSDeviceHeaders(req)
-	assert.Equal(t, fqdn, req.Header.Get("X-Device-Name"))
-	assert.Equal(t, "laptop", req.Header.Get("X-Device-Id"), "id is the short hostname")
-
-	// Sanity: exchange against a DoH target does not inject NextDNS headers.
-	cTest2 := newTestDoHClient(t, server)
-	cTest2.deviceFn = func() string { return fqdn }
-	q := new(dns.Msg).SetQuestion("example.com.", dns.TypeA)
-	_, _, err = cTest2.exchange(t.Context(), upstreamTarget{NSType: nbdns.DoHNameServerType, URL: server.URL}, q)
-	require.NoError(t, err)
-	assert.Empty(t, capturedHeader.Get("X-Device-Name"), "generic DoH must not send device headers")
-
-	// And via NextDNS target (with server.URL spoofing nextdns), headers do flow.
-	_, _, err = cTest2.exchange(t.Context(), upstreamTarget{NSType: nbdns.NextDNSNameServerType, URL: ""}, q)
-	assert.Error(t, err, "missing config id should error")
-
-	_ = target
 }
 
 func TestNextDNSDeviceID(t *testing.T) {
@@ -222,9 +195,7 @@ func TestDoHClient_ResolveBootstrap_UsesProvidedNameservers(t *testing.T) {
 			ips, err := c.resolveBootstrap(ctx, "dns.example.com")
 			require.NoError(t, err)
 			require.Len(t, ips, 1, "bootstrap must return the local server's A record")
-			addr, ok := netip.AddrFromSlice(ips[0])
-			require.True(t, ok, "bootstrap must return a valid IP")
-			assert.Equal(t, netip.MustParseAddr("203.0.113.42"), addr.Unmap(), "bootstrap must use the configured nameserver")
+			assert.Equal(t, netip.MustParseAddr("203.0.113.42"), ips[0], "bootstrap must use the configured nameserver")
 		})
 	}
 }

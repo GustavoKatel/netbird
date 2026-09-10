@@ -290,6 +290,9 @@ func (u *upstreamResolverBase) MatchSubdomains() bool {
 func (u *upstreamResolverBase) Stop() {
 	log.Debugf("stopping serving DNS for upstreams %s", u.flatUpstreams())
 	u.cancel()
+	if u.dohClient != nil {
+		u.dohClient.httpClient.CloseIdleConnections()
+	}
 }
 
 // flatUpstreams is for logging and ID hashing only, not for dispatch.
